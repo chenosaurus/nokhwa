@@ -365,6 +365,7 @@ pub const fn color_frame_formats() -> &'static [FrameFormat] {
         FrameFormat::MJPEG,
         FrameFormat::YUYV,
         FrameFormat::NV12,
+        FrameFormat::GRAY,
         FrameFormat::RAWRGB,
         FrameFormat::RAWBGR,
     ]
