@@ -414,7 +414,7 @@ impl FormatDecoder for LumaAFormat {
                 if dest.len() != data.len() * 2 {
                     return Err(NokhwaError::ProcessFrameError {
                         src: fcc,
-                        destination: "GRAY8 => LumaA".to_string(),
+                        destination: "GREY8 => LumaA".to_string(),
                         error: "Conversion Error".to_string(),
                     });
                 }

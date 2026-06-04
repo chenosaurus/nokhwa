@@ -289,7 +289,7 @@ impl TryFrom<CameraIndex> for usize {
 /// - YUYV is a mathematical color space. You can read more [here.](https://en.wikipedia.org/wiki/YCbCr)
 /// - NV12 is same as above. Note that a partial compression (e.g. [16, 235] may be coerced to [0, 255].
 /// - MJPEG is a motion-jpeg compressed frame, it allows for high frame rates.
-/// - GRAY is a grayscale image format, usually for specialized cameras such as IR Cameras.
+/// - GREY is a grayscale image format, usually for specialized cameras such as IR Cameras.
 /// - RAWRGB is a Raw RGB888 format.
 #[derive(Copy, Clone, Debug, Hash, Ord, PartialOrd, Eq, PartialEq)]
 #[cfg_attr(feature = "serialize", derive(Serialize, Deserialize))]
