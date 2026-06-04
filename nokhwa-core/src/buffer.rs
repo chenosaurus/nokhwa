@@ -20,9 +20,9 @@ use crate::{
 };
 use bytes::Bytes;
 use image::ImageBuffer;
-use std::time::Duration;
 #[cfg(feature = "opencv-mat")]
 use opencv::{boxed_ref::BoxedRef, core::Mat};
+use std::time::Duration;
 
 /// A buffer returned by a camera to accommodate custom decoding.
 /// Contains information of Resolution, the buffer's [`FrameFormat`], and the buffer.
@@ -34,6 +34,7 @@ pub struct Buffer {
     buffer: Bytes,
     source_frame_format: FrameFormat,
     capture_timestamp: Option<Duration>,
+    received_timestamp: Option<Duration>,
 }
 
 impl Buffer {
@@ -46,6 +47,7 @@ impl Buffer {
             buffer: Bytes::copy_from_slice(buf),
             source_frame_format,
             capture_timestamp: None,
+            received_timestamp: None,
         }
     }
 
@@ -63,6 +65,26 @@ impl Buffer {
             buffer: Bytes::copy_from_slice(buf),
             source_frame_format,
             capture_timestamp,
+            received_timestamp: None,
+        }
+    }
+
+    /// Creates a new buffer with backend-provided capture and receive timestamps.
+    #[must_use]
+    #[inline]
+    pub fn with_timestamps(
+        res: Resolution,
+        buf: &[u8],
+        source_frame_format: FrameFormat,
+        capture_timestamp: Option<Duration>,
+        received_timestamp: Option<Duration>,
+    ) -> Self {
+        Self {
+            resolution: res,
+            buffer: Bytes::copy_from_slice(buf),
+            source_frame_format,
+            capture_timestamp,
+            received_timestamp,
         }
     }
 
@@ -70,6 +92,12 @@ impl Buffer {
     #[must_use]
     pub fn capture_timestamp(&self) -> Option<Duration> {
         self.capture_timestamp
+    }
+
+    /// Get the backend-provided frame receive timestamp, if available.
+    #[must_use]
+    pub fn received_timestamp(&self) -> Option<Duration> {
+        self.received_timestamp
     }
 
     /// Get the [`Resolution`] of this buffer.

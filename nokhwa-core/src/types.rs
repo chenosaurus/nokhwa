@@ -312,7 +312,7 @@ impl Display for FrameFormat {
                 write!(f, "YUYV")
             }
             FrameFormat::GRAY => {
-                write!(f, "GRAY")
+                write!(f, "GREY")
             }
             FrameFormat::RAWRGB => {
                 write!(f, "RAWRGB")
@@ -333,7 +333,7 @@ impl FromStr for FrameFormat {
         match s {
             "MJPEG" => Ok(FrameFormat::MJPEG),
             "YUYV" => Ok(FrameFormat::YUYV),
-            "GRAY" => Ok(FrameFormat::GRAY),
+            "GREY" => Ok(FrameFormat::GRAY),
             "RAWRGB" => Ok(FrameFormat::RAWRGB),
             "RAWBGR" => Ok(FrameFormat::RAWBGR),
             "NV12" => Ok(FrameFormat::NV12),

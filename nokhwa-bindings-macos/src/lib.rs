@@ -244,6 +244,7 @@ mod internal {
     use std::ffi::CString;
     use std::{
         borrow::Cow,
+        cell::Cell,
         cmp::Ordering,
         collections::BTreeMap,
         convert::TryFrom,
@@ -406,6 +407,8 @@ mod internal {
         }
     }
 
+    /// Captured frame bytes, format, capture timestamp, and receive timestamp.
+    pub type CaptureData = (Vec<u8>, FrameFormat, Option<Duration>, Option<Duration>);
     pub type CompressionData<'a> = (Cow<'a, [u8]>, FrameFormat, Option<Duration>);
     pub type DataPipe<'a> = (Sender<CompressionData<'a>>, Receiver<CompressionData<'a>>);
 
@@ -441,6 +444,12 @@ mod internal {
                 didOutputSampleBuffer: CMSampleBufferRef,
                 _: *mut Object,
             ) {
+                let callback_arrived_wall = std::time::SystemTime::now();
+                let callback_arrived_mono_nanos = mach_absolute_time_nanos() as u128;
+                let received_ts = callback_arrived_wall
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .ok();
+
                 let image_buffer: CVImageBufferRef =
                     unsafe { CMSampleBufferGetImageBuffer(didOutputSampleBuffer) };
                 unsafe {
@@ -462,21 +471,15 @@ mod internal {
                 //   wall = SystemTime::now() - (mach_now - pts)
                 let capture_ts = {
                     let pts = unsafe {
-                        core_media::CMSampleBufferGetPresentationTimeStamp(
-                            didOutputSampleBuffer,
-                        )
+                        core_media::CMSampleBufferGetPresentationTimeStamp(didOutputSampleBuffer)
                     };
                     if pts.timescale > 0 {
-                        let pts_nanos = (pts.value as u128)
-                            .saturating_mul(1_000_000_000)
+                        let pts_nanos = (pts.value as u128).saturating_mul(1_000_000_000)
                             / (pts.timescale as u128);
-                        let mono_now_nanos = mach_absolute_time_nanos() as u128;
-                        let wall_now = std::time::SystemTime::now();
-
                         let age = Duration::from_nanos(
-                            mono_now_nanos.saturating_sub(pts_nanos) as u64,
+                            callback_arrived_mono_nanos.saturating_sub(pts_nanos) as u64,
                         );
-                        wall_now
+                        callback_arrived_wall
                             .duration_since(std::time::UNIX_EPOCH)
                             .ok()
                             .and_then(|wall_dur| wall_dur.checked_sub(age))
@@ -490,10 +493,12 @@ mod internal {
                 // https://c.tenor.com/0e_zWtFLOzQAAAAC/needy-streamer-overload-needy-girl-overdose.gif
                 let bufferlck_cv: *const c_void = unsafe { msg_send![this, bufferPtr] };
                 let buffer_sndr = unsafe {
-                    let ptr = bufferlck_cv.cast::<Sender<(Vec<u8>, FrameFormat, Option<Duration>)>>();
+                    let ptr = bufferlck_cv.cast::<Sender<CaptureData>>();
                     Arc::from_raw(ptr)
                 };
-                if let Err(_) = buffer_sndr.send((buffer_as_vec, FrameFormat::GRAY, capture_ts)) {
+                if let Err(_) =
+                    buffer_sndr.send((buffer_as_vec, FrameFormat::GRAY, capture_ts, received_ts))
+                {
                     // FIXME: dont, what the fuck???
                     return;
                 }
@@ -739,7 +744,7 @@ mod internal {
     impl AVCaptureVideoCallback {
         pub fn new(
             device_spec: &CStr,
-            buffer: &Arc<Sender<(Vec<u8>, FrameFormat, Option<Duration>)>>,
+            buffer: &Arc<Sender<CaptureData>>,
         ) -> Result<Self, NokhwaError> {
             let cls = &CALLBACK_CLASS as &Class;
             let delegate: *mut Object = unsafe { msg_send![cls, alloc] };
@@ -895,7 +900,7 @@ mod internal {
     pub struct AVCaptureDevice {
         inner: *mut Object,
         device: CameraInfo,
-        locked: bool,
+        locked: Cell<bool>,
     }
 
     impl AVCaptureDevice {
@@ -944,7 +949,7 @@ mod internal {
             Ok(AVCaptureDevice {
                 inner: capture,
                 device: camera_info,
-                locked: false,
+                locked: Cell::new(false),
             })
         }
 
@@ -991,7 +996,7 @@ mod internal {
         }
 
         pub fn lock(&self) -> Result<(), NokhwaError> {
-            if self.locked {
+            if self.locked.get() {
                 return Ok(());
             }
             if self.already_in_use() {
@@ -1010,19 +1015,19 @@ mod internal {
                 });
             }
             // Space these out for debug purposes
-            if !accepted == YES {
+            if accepted != YES {
                 return Err(NokhwaError::SetPropertyError {
                     property: "lockForConfiguration".to_string(),
                     value: "Locked".to_string(),
                     error: "Lock Rejected".to_string(),
                 });
             }
+            self.locked.set(true);
             Ok(())
         }
 
-        pub fn unlock(&mut self) {
-            if self.locked {
-                self.locked = false;
+        pub fn unlock(&self) {
+            if self.locked.replace(false) {
                 unsafe { msg_send![self.inner, unlockForConfiguration] }
             }
         }
@@ -1045,6 +1050,7 @@ mod internal {
 
                 if dimensions.height == descriptor.resolution().height() as i32
                     && dimensions.width == descriptor.resolution().width() as i32
+                    && format.fourcc == descriptor.format()
                 {
                     selected_format = format.internal;
 
@@ -1061,6 +1067,7 @@ mod internal {
                 }
             }
             if selected_range.is_null() || selected_format.is_null() {
+                self.unlock();
                 return Err(NokhwaError::SetPropertyError {
                     property: "CameraFormat".to_string(),
                     value: descriptor.to_string(),
@@ -2332,6 +2339,19 @@ mod internal {
                 ];
             };
             Ok(())
+        }
+
+        /// Set whether AVFoundation should drop late frames instead of queueing them.
+        pub fn set_always_discards_late_video_frames(&self, discard: bool) {
+            let discard_late_frames = if discard { YES } else { NO };
+            // SAFETY: `self.inner` is an `AVCaptureVideoDataOutput` allocated by
+            // `Default`, and `setAlwaysDiscardsLateVideoFrames:` takes a BOOL.
+            let _: () = unsafe {
+                msg_send![
+                    self.inner,
+                    setAlwaysDiscardsLateVideoFrames: discard_late_frames
+                ]
+            };
         }
 
         pub fn set_frame_format(&self, format: FrameFormat) -> Result<(), NokhwaError> {

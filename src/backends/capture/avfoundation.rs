@@ -18,7 +18,7 @@ use flume::{Receiver, Sender};
 #[cfg(target_os = "macos")]
 use nokhwa_bindings_macos::{
     AVCaptureDevice, AVCaptureDeviceInput, AVCaptureSession, AVCaptureVideoCallback,
-    AVCaptureVideoDataOutput,
+    AVCaptureVideoDataOutput, CaptureData,
 };
 use nokhwa_core::{
     buffer::Buffer,
@@ -32,9 +32,12 @@ use nokhwa_core::{
 #[cfg(target_os = "macos")]
 use nokhwa_core::{pixel_format::RgbFormat, types::RequestedFormatType};
 #[cfg(target_os = "macos")]
-use std::{ffi::CString, sync::Arc, time::Duration};
+use std::{ffi::CString, sync::Arc};
 
 use std::{borrow::Cow, collections::HashMap};
+
+#[cfg(target_os = "macos")]
+type CapturedFrame = CaptureData;
 
 /// The backend struct that interfaces with V4L2.
 /// To see what this does, please see [`CaptureBackendTrait`].
@@ -55,8 +58,8 @@ pub struct AVFoundationCaptureDevice {
     info: CameraInfo,
     buffer_name: CString,
     format: CameraFormat,
-    frame_buffer_receiver: Arc<Receiver<(Vec<u8>, FrameFormat, Option<Duration>)>>,
-    fbufsnd: Arc<Sender<(Vec<u8>, FrameFormat, Option<Duration>)>>,
+    frame_buffer_receiver: Arc<Receiver<CapturedFrame>>,
+    fbufsnd: Arc<Sender<CapturedFrame>>,
 }
 
 #[cfg(target_os = "macos")]
@@ -119,6 +122,19 @@ impl AVFoundationCaptureDevice {
             RequestedFormat::new::<RgbFormat>(RequestedFormatType::Exact(camera_format)),
         )
     }
+
+    fn recv_latest_frame(&self) -> Result<CapturedFrame, NokhwaError> {
+        let mut latest = self
+            .frame_buffer_receiver
+            .recv()
+            .map_err(|why| NokhwaError::ReadFrameError(why.to_string()))?;
+
+        for queued in self.frame_buffer_receiver.drain() {
+            latest = queued;
+        }
+
+        Ok(latest)
+    }
 }
 
 #[cfg(target_os = "macos")]
@@ -156,7 +172,7 @@ impl CaptureBackendTrait for AVFoundationCaptureDevice {
             .device
             .supported_formats()?
             .into_iter()
-            .filter(|x| x.format() != fourcc);
+            .filter(|x| x.format() == fourcc);
         let mut res_list = HashMap::new();
         for format in supported_cfmt {
             match res_list.get_mut(&format.resolution()) {
@@ -252,6 +268,7 @@ impl CaptureBackendTrait for AVFoundationCaptureDevice {
         let bufname = &self.buffer_name;
         let videocallback = AVCaptureVideoCallback::new(bufname, &self.fbufsnd)?;
         let output = AVCaptureVideoDataOutput::new();
+        output.set_always_discards_late_video_frames(true);
         output.add_delegate(&videocallback)?;
         output.set_frame_format(self.camera_format().format())?;
         session.add_output(&output)?;
@@ -282,21 +299,19 @@ impl CaptureBackendTrait for AVFoundationCaptureDevice {
     fn frame(&mut self) -> Result<Buffer, NokhwaError> {
         self.refresh_camera_format()?;
         let cfmt = self.camera_format();
-        let (bytes, _fmt, capture_ts) = self
-            .frame_buffer_receiver
-            .recv()
-            .map_err(|why| NokhwaError::ReadFrameError(why.to_string()))?;
-        let buffer = Buffer::with_timestamp(cfmt.resolution(), &bytes, cfmt.format(), capture_ts);
-        let _ = self.frame_buffer_receiver.drain();
+        let (bytes, _fmt, capture_ts, received_ts) = self.recv_latest_frame()?;
+        let buffer = Buffer::with_timestamps(
+            cfmt.resolution(),
+            &bytes,
+            cfmt.format(),
+            capture_ts,
+            received_ts,
+        );
         Ok(buffer)
     }
 
     fn frame_raw(&mut self) -> Result<Cow<'_, [u8]>, NokhwaError> {
-        let result = match self.frame_buffer_receiver.recv() {
-            Ok(recv) => Ok(Cow::from(recv.0)),
-            Err(why) => Err(NokhwaError::ReadFrameError(why.to_string())),
-        };
-        result
+        self.recv_latest_frame().map(|frame| Cow::from(frame.0))
     }
 
     fn stop_stream(&mut self) -> Result<(), NokhwaError> {
